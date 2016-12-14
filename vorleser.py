@@ -1,51 +1,103 @@
 import requests
 import lxml.html
+from os import path, makedirs
+from json import dump
 
 
-def get_abs_link(rel_link):
-    return 'https://www.vorleser.net/{}'.format(rel_link)
+class VorleserScraper(object):
+    ''' writes a books.json in the form:
+        {'<author_name>': [{booktitle: 'title of book one', url: 'downloadurl 1'}, {...}]...}
+        and downloads all mp3 in this hierarchy:
+        <author_name>
+          |- booktitle1.mp3
+          |- ...
+    '''
+    base_url = 'https://www.vorleser.net/'
 
-author_url = 'https://www.vorleser.net/autor.html'
-print('fetching: ' + author_url)
-author_site_html = requests.get(author_url)
-dom = lxml.html.fromstring(author_site_html.content)
+    def __init__(self):
+        self.books = {}
+        self.book_links = []
+        self.cookies = requests.get(self.base_url).cookies
 
-author_links = []
-# select the url in href for all a tags(links)
-for link in dom.xpath('//a/@href'):
-    if '/autor.html' in link:
-        link = get_abs_link(link)
-        if link not in author_links:
-            author_links.append(link)
-            print(link)
-            with open('q_author_sites', 'a') as f:
-                f.write(link + '\n')
+    def mkdir(self, destination):
+        if not path.exists(destination):
+            makedirs(destination)
 
-book_site_links = []
-for link in author_links:
-    link = get_abs_link(link)
-    print('fetching: ' + link)
-    author_html = requests.get(link)
-    dom = lxml.html.fromstring(author_html.content)
-    for book_site_link in dom.xpath('//a/@href'):
-        if '/hoerbuch.html' in book_site_link:
-            book_site_link = get_abs_link(book_site_link)
-            if book_site_link not in book_site_links:
-                book_site_links.append(book_site_link)
-                if book_site_link not in book_site_links:
-                    print(book_site_link)
-                    with open('q_book_sites', 'a') as f:
-                        f.write(book_site_link + '\n')
+    def download(self, url, destination, filename):
+        self.mkdir(destination)
+        filepath = destination + '/' + filename + '.mp3'
+        print('checking {}'.format(filepath))
+        if path.exists(filepath):
+            print('file {} already exists. Skipping'.format(filepath))
+            return
 
-book_links = []
-for link in book_site_links:
-    link = get_abs_link(link)
-    print('fetching: ' + link)
-    book_html = requests.get(link)
-    dom = lxml.html.fromstring(book_html.content)
-    for book_link in dom.xpath('//a/@href'):
-        if 'https://www.vorleser.net/f-Download-d-audiobook.html?id' in book_link:
-            if book_link not in book_links:
-                print(book_link)
-                with open('q_books', 'a') as f:
-                    f.write(book_link + '\n')
+        print('downloading {} as {}'.format(url, filepath))
+        with open(filepath, 'wb') as handle:
+            response = requests.get(url, cookies=self.cookies, stream=True)
+            if not response.ok:
+                pass
+
+            for block in response.iter_content(1024):
+                handle.write(block)
+
+    def get_abs_link(self, rel_link):
+        return 'https://www.vorleser.net/{}'.format(rel_link)
+
+    def get_links_containing(self, url, substring):
+        html = requests.get(url)
+        dom = lxml.html.fromstring(html.content)
+
+        links = []
+        for link in dom.xpath('//a/@href'):
+            if substring in link:
+                link = self.get_abs_link(link)
+                if link not in links:
+                    links.append(link)
+
+        return links
+
+    def add_book(self, url):
+        html = requests.get(url)
+        dom = lxml.html.fromstring(html.content)
+        title = dom.xpath('//*[@id="site-wrapper"]/div[1]/div/div/div[2]/div[1]/div[2]/h2/text()')[0]
+        # escape /
+        title = title.replace("/", " ")
+        author = dom.xpath('//*[@id="site-wrapper"]/div[1]/div/div/div[2]/div[1]/div[2]/h5/a/text()')[0]
+        for link in dom.xpath('//a/@href'):
+            link = self.get_abs_link(link)
+            if 'https://www.vorleser.net/f-Download-d-audiobook.html?id' in link:
+                url = link
+
+        if author in self.books:
+            # only insert new books
+            if url not in self.book_links:
+                self.books[author].append({'title': title, 'author': author, 'url': url})
+                self.book_links.append(url)
+        else:
+            self.books[author] = [{'title': title, 'author': author, 'url': url}]
+
+    def get_book_links(self):
+        author_url = 'https://www.vorleser.net/autor.html'
+        author_page_links = self.get_links_containing(author_url, '/autor.html')
+        book_page_links = []
+        for author_page_link in author_page_links:
+            book_page_links = book_page_links + self.get_links_containing(author_page_link, '/hoerbuch.html')
+            print('scraping: {}'.format(author_page_link))
+
+        for book_page_link in book_page_links:
+            print('scraping: {}'.format(book_page_link))
+            self.add_book(book_page_link)
+
+        with open('books.json', 'w') as handle:
+            dump(self.books, handle)
+        print(self.books)
+
+    def download_books(self):
+        for k, v in self.books.items():
+            for book in v:
+                self.download(book['url'], k, book['title'])
+
+if __name__ == "__main__":
+    vorleser = VorleserScraper()
+    vorleser.get_book_links()
+    vorleser.download_books()
